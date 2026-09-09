@@ -1,0 +1,16 @@
+# World data and container state — never commit (large, machine-specific).
+# Ignore everything inside, but keep the empty dir in the tree via .gitkeep.
+data/*
+!data/.gitkeep
+
+# Scaffolded working copies of servers — your real, running configs.
+# Keep these local; commit a template instead if you want it version-controlled.
+instances/*
+!instances/.gitkeep
+
+# The shared Valheim dedicated server download (~1 GB, fetched by SteamCMD on
+# first start and reused by every instance). Never commit it; it re-downloads.
+server/
+
+# Python bytecode, if you ever import vh.py rather than running it
+__pycache__/
