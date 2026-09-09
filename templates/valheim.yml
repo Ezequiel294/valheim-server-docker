@@ -46,26 +46,20 @@ services:
     container_name: vh-__INSTANCE__
     restart: unless-stopped
 
-    # ⚠ THIS IMAGE NEEDS AN x86_64 HOST. Valheim's dedicated server is an
-    # x86_64 Linux binary — Iron Gate ships no ARM build — so the image is
-    # published for linux/amd64 only. On an ARM host (Apple Silicon, Raspberry
-    # Pi, an ARM VPS) Docker refuses it outright:
+    # ⚠ ARCHITECTURE. Valheim's dedicated server is an x86_64 Linux binary —
+    # Iron Gate ships no ARM build — so this image is linux/amd64 only. On an
+    # ARM host Docker refuses it outright:
     #     no matching manifest for linux/arm64/v8 in the manifest list entries
-    # Pinning the platform gets the container to START under emulation:
+    # Pinning the platform lets it start under emulation:
     # platform: linux/amd64
-    # ...but that is not a working server. SteamCMD's core is a 32-bit x86
-    # binary and it segfaults while loading the Steam API under emulation —
-    # under Rosetta AND under QEMU, both verified on Apple Silicon:
-    #     steamcmd.sh: line 86: Segmentation fault  $DEBUGGER "$STEAMEXE" "$@"
-    #     ERROR - Failed to download Valheim server from Steam - retrying later
-    # The container comes up, retries forever, and never downloads the game.
-    # Run the server on an x86_64 machine. vh.py sets this line for you on an
-    # ARM host anyway, and warns you at `up`, so the attempt fails loudly
-    # rather than looking like a network problem.
+    # Whether that HELPS depends on the host, and the two cases differ:
+    #   ARM macOS  — no. SteamCMD's 32-bit core segfaults under Docker
+    #                Desktop's Rosetta and QEMU backends alike, so the game
+    #                download never completes and the container retries forever.
+    #   ARM Linux  — yes, with setup. box64 translates x86_64 in userspace and
+    #                is the established way to run Valheim on a Raspberry Pi.
+    # vh.py sets this line for you on an ARM host. See docs/valheim-on-arm.md.
 
-    # Optional but recommended: lets the Steam networking library raise its own
-    # thread priority. Without it the startup log says "failed to set thread
-    # priority" and the server runs slightly worse under load.
     cap_add:
       - sys_nice
 

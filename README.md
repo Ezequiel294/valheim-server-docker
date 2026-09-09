@@ -24,6 +24,7 @@ copy and hand-edit. Either way your real config lives under `instances/`
 ├── server/                   the shared Valheim download, ~1 GB (gitignored)
 ├── docs/
 │   ├── finding-your-server.md   how you and your friends actually connect
+│   ├── valheim-on-arm.md        Raspberry Pi / ARM hosts, and what works there
 │   ├── world-modifiers.md       difficulty, resources, raids, portals
 │   └── valheim-1.0-worlds.md    the new save format, and upgrading an old world
 └── vh.py                     the manager
@@ -139,40 +140,58 @@ environment variables. **`vh.py` does not manage plugins**: it never downloads,
 installs, moves or deletes a mod file. Enabling a loader and putting `.dll` files
 in `data/<name>/bepinex/plugins/` is yours to do.
 
-## You need an x86_64 host
+## Architecture: this needs an x86_64 binary somewhere
 
-Valheim's dedicated server is an **x86_64 Linux binary**. Iron Gate ships no ARM
-build, so the container image is published for `linux/amd64` only and no image
-can change that. On an ARM host Docker refuses it outright:
+Valheim's dedicated server is an **x86_64 Linux binary** and Iron Gate ships no
+ARM build, so the image is published for `linux/amd64` only. What that costs you
+depends entirely on what kind of ARM host you have — the two cases are not alike.
 
-```
-no matching manifest for linux/arm64/v8 in the manifest list entries
-```
+### Docker Desktop on an ARM Mac — does not work
 
-**Emulation does not rescue this.** `platform: linux/amd64` gets the container to
-start, but SteamCMD's core is a *32-bit* x86 binary and it segfaults while
-loading the Steam API under emulation — verified on Apple Silicon under both
-Docker's Rosetta backend and its QEMU fallback:
+Verified here on Apple Silicon. `platform: linux/amd64` gets the container to
+start, but SteamCMD's core is a *32-bit* x86 binary and it segfaults loading the
+Steam API under both of Docker Desktop's emulation backends, Rosetta and QEMU:
 
 ```
 steamcmd.sh: line 86: Segmentation fault  $DEBUGGER "$STEAMEXE" "$@"
 ERROR - Failed to download Valheim server from Steam - retrying later
 ```
 
-The container starts, looks healthy, and retries a download that cannot succeed.
+The container comes up, reports healthy, and retries a download that cannot
+succeed. Don't host from an ARM Mac.
 
-So: **run the server on an x86_64 machine** — an old PC, a NAS, a small VPS. This
-repo works fine from an ARM laptop as the place you *write and keep* the config;
-it just cannot be the machine that runs it.
+### ARM Linux (Raspberry Pi 5, ARM SBCs) — viable, with setup
 
-`vh.py` still writes `platform: linux/amd64` when it scaffolds on an ARM host,
-and prints a warning at `up`, so if you try anyway the failure is loud and points
-here rather than looking like a network problem.
+This is a different mechanism and a much better one.
+[box64](https://github.com/ptitSeb/box64) translates x86_64 binaries to ARM64 in
+userspace, running natively on Linux rather than emulating a whole machine. It is
+actively maintained, and running Valheim on a Pi is a well-trodden use case —
+people report a Pi 5 sitting at 30–40% CPU with two players.
+
+Three things a Pi 5 needs:
+
+1. **A 4K-page kernel.** The Pi 5 defaults to a 16K page size; box64 and box86
+   need 4K. Add `kernel=kernel8.img` to `/boot/firmware/config.txt` and reboot.
+   Costs roughly 5% general performance and is not optional.
+2. **8 GB RAM or more.** Valheim idles around 2.8 GB before anyone connects.
+3. **A USB SSD**, not a microSD card. Startup and world saves are the hitchy part.
+
+Whether the *container* runs under box64 is a separate question from whether the
+server does. Registering box64 with `binfmt_misc` (using the `F` flag, so the
+interpreter survives the container's mount namespace) is reported to work but is
+not a well-supported path yet — box64's static build is marked experimental. Try
+it before assuming you need a custom image; see `docs/valheim-on-arm.md`.
+
+### The path of least resistance
+
+An x86_64 machine — an old PC, a NAS, a small VPS — runs everything here as
+built, today, with no emulation and no caveats.
 
 ## Requirements
 
 - Docker with Compose v2, and Python 3.
-- **An x86_64 host.** ARM does not work, emulated or otherwise (see above).
+- **x86_64 for the simple path.** ARM Linux works via box64 with setup; an
+  ARM Mac does not work at all (see above).
 - ~4 GB RAM minimum, 8 GB recommended. Valheim leans on **a few fast cores** far
   more than on many slow ones — two 5 GHz cores beat six 2 GHz ones.
 - UDP 2456–2457 reachable from the internet if you want people outside your
