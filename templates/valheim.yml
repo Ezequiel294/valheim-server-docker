@@ -1,0 +1,420 @@
+# =============================================================================
+# VALHEIM dedicated server
+# -----------------------------------------------------------------------------
+# One server, one world. Everything below the "Essentials" block is optional and
+# commented out — uncomment only what you actually want. The container defaults
+# are shown next to each option, so a commented line tells you both what the
+# setting does AND what you get if you leave it alone.
+#
+# Two separate configuration surfaces live in this file, and they behave
+# differently — this trips people up constantly:
+#
+#   1. ENVIRONMENT VARIABLES configure the CONTAINER: updates, backups, restart
+#      schedules, notifications, logging, permissions. Most of this file.
+#   2. SERVER_ARGS configures the GAME: difficulty, combat, resources, raids,
+#      portals. These are Valheim command-line arguments squeezed into one
+#      string — see the "Gameplay" section. There is no env var for them.
+#
+# There is no RCON. Valheim admin commands (ban, kick, save) are typed in-game
+# by an admin pressing F5, not from the host. What the container gives you
+# instead is a process supervisor — `vh.py backup` and `vh.py restart` wrap the
+# two operations worth wrapping.
+#
+# template-only >>>
+# This is a BLUEPRINT — don't run it directly. Scaffold an instance from it:
+#     python vh.py create           # guided: asks questions, writes a clean file
+#     python vh.py new <name>       # or copy this annotated file to edit by hand
+# vh.py replaces every __INSTANCE__ token with your <name>.
+# <<< template-only
+#
+# Full option reference:
+#   https://github.com/community-valheim-tools/valheim-server-docker
+# =============================================================================
+services:
+  valheim:
+    # The maintained image. NOT docker.io/lloesche/valheim-server — that mirror
+    # stopped receiving pushes in March 2026, months before Valheim 1.0 changed
+    # the on-disk world format, and it takes inconsistent backups of a 1.0 world.
+    # The GitHub project was transferred; this registry is where it lives now.
+    #
+    # Tracking `latest` means you get save-format and steamcmd fixes as they
+    # land — which is the whole point of this image. To pin instead, append a
+    # tag:  ghcr.io/community-valheim-tools/valheim-server:1.2.0
+    # Tags published so far: latest, 1.2.0, 1.1.0, 1.0.0
+    # (1.2.0 is the first release that understands Valheim 1.0 world directories.)
+    image: ghcr.io/community-valheim-tools/valheim-server
+    container_name: vh-__INSTANCE__
+    restart: unless-stopped
+
+    # ⚠ THIS IMAGE NEEDS AN x86_64 HOST. Valheim's dedicated server is an
+    # x86_64 Linux binary — Iron Gate ships no ARM build — so the image is
+    # published for linux/amd64 only. On an ARM host (Apple Silicon, Raspberry
+    # Pi, an ARM VPS) Docker refuses it outright:
+    #     no matching manifest for linux/arm64/v8 in the manifest list entries
+    # Pinning the platform gets the container to START under emulation:
+    # platform: linux/amd64
+    # ...but that is not a working server. SteamCMD's core is a 32-bit x86
+    # binary and it segfaults while loading the Steam API under emulation —
+    # under Rosetta AND under QEMU, both verified on Apple Silicon:
+    #     steamcmd.sh: line 86: Segmentation fault  $DEBUGGER "$STEAMEXE" "$@"
+    #     ERROR - Failed to download Valheim server from Steam - retrying later
+    # The container comes up, retries forever, and never downloads the game.
+    # Run the server on an x86_64 machine. vh.py sets this line for you on an
+    # ARM host anyway, and warns you at `up`, so the attempt fails loudly
+    # rather than looking like a network problem.
+
+    # Optional but recommended: lets the Steam networking library raise its own
+    # thread priority. Without it the startup log says "failed to set thread
+    # priority" and the server runs slightly worse under load.
+    cap_add:
+      - sys_nice
+
+    # Valheim only writes the world to disk every 20 minutes and at shutdown.
+    # Kill the container faster than the final save and you lose the session.
+    # Two minutes is the shutdown window the container itself asks for.
+    stop_grace_period: 2m
+
+    ports:
+      # host:container. The GAME port is SERVER_PORT (2456); the STEAM QUERY
+      # port is always SERVER_PORT + 1 (2457) — that second one is what you type
+      # into Steam's "Add server by IP" box, and what the status page queries.
+      - "2456-2457:2456-2457/udp"
+      # CROSSPLAY adds a third UDP port (2458) for the PlayFab backend.
+      # Uncomment this line whenever you set CROSSPLAY: "true" below.
+      # - "2458:2458/udp"
+      # Some mods use RPC on SERVER_PORT + 2, which is also 2458 — same line.
+
+    environment:
+      # ═══ Essentials ══════════════════════════════════════════════════════════
+      # These four are the only things most people ever change.
+
+      # Name shown in the in-game Community browser and Steam server list.
+      SERVER_NAME: "__INSTANCE__"
+
+      # The world to load. For a Valheim 1.0 save this is the DIRECTORY name
+      # inside /config/worlds_local/; for a pre-1.0 save it is the filename
+      # without the .db/.fwl extension. If no such world exists, one is created.
+      WORLD_NAME: "Dedicated"
+
+      # MINIMUM 5 CHARACTERS. Shorter and valheim_server refuses to start — the
+      # container comes up, the server process dies, and the log is the only
+      # clue. The password may also not be contained in the server or world name.
+      SERVER_PASS: "changeme"
+
+      # Whether the server is listed in the public Community browser.
+      # "false" still allows joining by direct IP ("Join IP" in-game) — but it
+      # also hides the server from Steam's browser and stops it answering Steam
+      # queries, which disables the status page (see Monitoring below).
+      SERVER_PUBLIC: "true"
+
+      # Accept non-Steam clients (Xbox, Microsoft Store, Apple App Store, console).
+      # Switches matchmaking from Steam to PlayFab. Costs you Steam LAN
+      # discovery, and some mods misbehave with it on — hence off by default.
+      # Turning this on requires the 2458 port line above.
+      CROSSPLAY: "false"
+
+      # UDP start port. Change this only if 2456 is taken; remember the ports:
+      # block above and that the query port moves with it (SERVER_PORT + 1).
+      # SERVER_PORT: "2456"                # default: 2456
+
+      # ═══ Gameplay — Valheim's own arguments ══════════════════════════════════
+      # Everything here goes in ONE string. Three kinds of argument:
+      #
+      #   -preset <name>            a whole difficulty package
+      #   -modifier <cat> <value>   one dial
+      #   -setkey <name>            an on/off switch
+      #
+      # ORDER MATTERS AND FAILS SILENTLY. The server reads the arguments left to
+      # right, and a -preset RESETS every modifier before it. So this:
+      #     -modifier combat veryhard -preset casual
+      # throws your combat setting away without a word. Always write:
+      #     preset first, then modifiers, then setkeys.
+      #
+      # -preset:  normal | casual | easy | hard | hardcore | immersive | hammer
+      #
+      # -modifier categories and their values:
+      #     combat        veryeasy | easy | hard | veryhard
+      #     deathpenalty  casual | veryeasy | easy | hard | hardcore
+      #     resources     muchless | less | more | muchmore | most
+      #     raids         none | muchless | less | more | muchmore
+      #     portals       casual | hard | veryhard
+      #   (Each category has an unnamed "standard" default: to keep a category
+      #    at standard, just don't pass it.)
+      #
+      # -setkey switches:
+      #     nobuildcost    building consumes no materials
+      #     playerevents   raids/events trigger per player, not per world
+      #     passivemobs    creatures never attack first
+      #     nomap          no map, no map sharing, no death markers
+      #
+      # Example — hard combat and generous resources, everything else standard:
+      #     SERVER_ARGS: "-modifier combat hard -modifier resources muchmore"
+      #
+      # Example — the hard preset, but soften the death penalty:
+      #     SERVER_ARGS: "-preset hard -modifier deathpenalty easy"
+      #
+      # See docs/world-modifiers.md for what each value actually does.
+      # SERVER_ARGS: ""                    # default: empty (standard world)
+
+      # ═══ Access control ══════════════════════════════════════════════════════
+      # SPACE-SEPARATED SteamID64s (the 17-digit form, e.g. 76561198000000000).
+      # A player's ID shows in-game with F2, and in the server log when they join.
+      #
+      # WARNING: these OVERWRITE the corresponding file in /config on every
+      # start. Set the variable and /config/adminlist.txt is rewritten from it;
+      # anything you added to the file by hand is gone. Manage each list in one
+      # place — either here or in the file, not both.
+      #
+      # Admins get the F5 console in-game (ban, kick, save, ...). The client
+      # must be launched with -console for F5 to open at all.
+      # ADMINLIST_IDS: ""
+      # BANNEDLIST_IDS: ""
+      # A non-empty permittedlist turns the server into a whitelist: only these
+      # IDs may join. Leave it empty for "anyone with the password".
+      # PERMITTEDLIST_IDS: ""
+
+      # ═══ Backups ═════════════════════════════════════════════════════════════
+      # The container backs up /config/worlds_local on startup and on a schedule.
+      # Backups land in the instance's own data/ directory, so they survive
+      # `vh.py down`. Force one at any time with `vh.py backup <name>`.
+      # BACKUPS: "true"                    # default: true — set false to disable
+      # BACKUPS_DIRECTORY: "/config/backups"   # keep it OUT of worlds_local, or
+      #                                    #   each backup backs up the last one
+      # BACKUPS_MAX_AGE: "3"               # default: 3 — days before a backup is deleted
+      # BACKUPS_MAX_COUNT: "0"             # default: 0 (unlimited). MAX_AGE still
+      #                                    #   applies: old backups go either way
+      # BACKUPS_ZIP: "true"                # default: true. false stores a plain
+      #                                    #   DIRECTORY for a 1.0 world — any
+      #                                    #   POST_BACKUP_HOOK must then copy -r
+      #
+      # BACKUPS_IF_IDLE: "true"            # default: true — back up even with
+      #                                    #   nobody online
+      # Setting it "false" is worth understanding: backups then only run around
+      # actual play. That is less disk churn AND safer, because a 1.0 world is a
+      # directory of chunk files and a backup taken mid-save can catch a chunk
+      # index pointing at files already replaced. The container detects that via
+      # the world's _main.<n>.ok marker and retries up to three times, but fewer
+      # pointless backups means fewer chances to hit it.
+      # BACKUPS_IDLE_GRACE_PERIOD: "3600"  # default: 3600 — seconds after the last
+      #                                    #   player leaves during which backups
+      #                                    #   still run. Must outlast one 20-min
+      #                                    #   world save plus one BACKUPS_CRON tick
+
+      # ═══ Schedules ═══════════════════════════════════════════════════════════
+      # Standard five-field cron, in the container's TZ. Empty string = disabled.
+      # BACKUPS_CRON: "5 * * * *"          # default: hourly at :05
+      # UPDATE_CRON: "*/15 * * * *"        # default: every 15 min. This is how the
+      #                                    #   game itself stays current — the image
+      #                                    #   re-runs steamcmd, so you get new
+      #                                    #   Valheim versions without a new image
+      # RESTART_CRON: "10 5 * * *"         # default: 05:10 daily. Mitigates the
+      #                                    #   server's slow memory growth
+      # UPDATE_IF_IDLE: "true"             # default: true — never yank the server
+      # RESTART_IF_IDLE: "true"            # default: true —   out from under players
+      #
+      # On a non-public server there is no Steam query to ask "is anyone on?", so
+      # idleness is inferred by counting inbound UDP datagrams:
+      # IDLE_DATAGRAM_WINDOW: "3"          # default: 3 — seconds to listen
+      # IDLE_DATAGRAM_MAX_COUNT: "30"      # default: 30 — datagrams tolerated
+      #                                    #   before declaring "not idle"
+      #
+      # DEPRECATED — DO NOT SET THESE. UPDATE_INTERVAL and BACKUPS_INTERVAL are
+      # the old seconds-based timers. Setting either one SILENTLY DISABLES the
+      # matching cron above, and you are back to a fixed interval with no way to
+      # tell from the outside. They exist only so old configs keep working.
+      # UPDATE_INTERVAL: ""                # legacy — leave unset
+      # BACKUPS_INTERVAL: ""               # legacy — leave unset
+
+      # ═══ Monitoring ══════════════════════════════════════════════════════════
+      # Status page: writes /status.json every 10 s with player count, version and
+      # server name, served by a tiny httpd.
+      # REQUIRES SERVER_PUBLIC=true — the data comes from the Steam query port,
+      # and a private server does not answer queries. With SERVER_PUBLIC=false
+      # you get a status.json containing only a timeout error, forever.
+      # Expose the port too (e.g. add "8080:80/tcp" to ports: above).
+      # STATUS_HTTP: "false"               # default: false
+      # STATUS_HTTP_PORT: "80"             # default: 80 (container-side)
+      # STATUS_HTTP_CONF: "/config/httpd.conf"    # busybox httpd config — use it
+      #                                    #   to restrict access by IP or login
+      # STATUS_HTTP_HTDOCS: "/opt/valheim/htdocs" # where status.json is written;
+      #                                    #   drop an index.html beside it and
+      #                                    #   it is served at /
+      #
+      # Supervisor web UI: start/stop/restart the container's internal services
+      # (valheim-server, valheim-backup, valheim-updater) from a browser, plus an
+      # XML-RPC API at /RPC2. Expose 9001/tcp in ports: if you turn this on.
+      # It has no TLS and a plaintext password — LAN only, please.
+      # SUPERVISOR_HTTP: "false"           # default: false
+      # SUPERVISOR_HTTP_PORT: "9001"       # default: 9001
+      # SUPERVISOR_HTTP_USER: "admin"      # default: admin
+      # SUPERVISOR_HTTP_PASS: ""           # required — the UI is off without one
+      # SUPERVISOR_HTTP_PASS_FILE: ""      # ...or read it from a secrets mount
+      #
+      # Ship logs to a remote syslog collector:
+      # SYSLOG_REMOTE_HOST: ""             # host or IP; empty = local only
+      # SYSLOG_REMOTE_PORT: "514"          # default: 514 (UDP)
+      # SYSLOG_REMOTE_AND_LOCAL: "true"    # default: true — keep logging locally
+      #                                    #   too, so `vh.py logs` still works
+
+      # ═══ Log filters ═════════════════════════════════════════════════════════
+      # Valheim's server log is extremely noisy. These strip lines before they
+      # reach `docker logs`. Sensible defaults are already applied — the entries
+      # below show what they are, not what you must set.
+      #
+      # EMPTY and UTF8 are plain booleans. EVERY OTHER FILTER IS A PREFIX: append
+      # any suffix you like to define additional, independent filters. That is
+      # the mechanism, not a typo:
+      #     VALHEIM_LOG_FILTER_STARTSWITH: "(Filename:"
+      #     VALHEIM_LOG_FILTER_STARTSWITH_Steam: "Steam manager"
+      #     VALHEIM_LOG_FILTER_CONTAINS_Spawned: "Got character ZDOID from"
+      #
+      # VALHEIM_LOG_FILTER_EMPTY: "true"     # default: true — drop blank lines
+      # VALHEIM_LOG_FILTER_UTF8: "true"      # default: true — drop invalid UTF-8
+      # VALHEIM_LOG_FILTER_MATCH: " "        # default: a single space (yes, really)
+      # VALHEIM_LOG_FILTER_STARTSWITH: "(Filename:"   # default: the repeating
+      #                                      #   Debug.bindings.h line
+      # VALHEIM_LOG_FILTER_ENDSWITH: ""      # default: unset
+      # VALHEIM_LOG_FILTER_CONTAINS: ""      # default: unset
+      # VALHEIM_LOG_FILTER_REGEXP: ""        # default: unset
+      # VALHEIM_LOG_FILTER_VERBOSE: "2"      # how chatty the filter itself is
+      #
+      # Turn a filter into a TRIGGER: define ON_<same name> and the matching line
+      # is piped to that command on stdin instead of being dropped. Same prefix
+      # rule — the suffix pairs the filter with its hook.
+      # ON_VALHEIM_LOG_FILTER_MATCH: ""
+      # ON_VALHEIM_LOG_FILTER_STARTSWITH: ""
+      # ON_VALHEIM_LOG_FILTER_ENDSWITH: ""
+      # ON_VALHEIM_LOG_FILTER_CONTAINS: ""
+      # ON_VALHEIM_LOG_FILTER_REGEXP: ""
+      #
+      # Announce every player spawn on Discord (note the paired suffix):
+      #     DISCORD_WEBHOOK: "https://discord.com/api/webhooks/..."
+      #     VALHEIM_LOG_FILTER_CONTAINS_Spawned: "Got character ZDOID from"
+      #     ON_VALHEIM_LOG_FILTER_CONTAINS_Spawned: '{ read l; l=${l//*ZDOID from /}; l=${l// :*/}; curl -sfSL -X POST -H "Content-Type: application/json" -d "{\"username\":\"Valheim\",\"content\":\"Player $$l spawned into the world\"}" "$$DISCORD_WEBHOOK"; }'
+
+      # ═══ Event hooks ═════════════════════════════════════════════════════════
+      # Shell commands run at points in the container's lifecycle. Each one
+      # BLOCKS the event it is attached to until it returns — a slow hook stalls
+      # startup, a backup, or a shutdown.
+      #
+      # In THIS file a literal $ must be written $$, or compose will try to
+      # substitute it before the container ever sees it. Single-quote hooks that
+      # contain double quotes.
+      #
+      # PRE_SUPERVISOR_HOOK: ""            # before supervisord starts
+      # PRE_BOOTSTRAP_HOOK: ""             # before bootstrapping
+      # POST_BOOTSTRAP_HOOK: ""            # after bootstrap, before any service —
+      #                                    #   the place to apt-get install tools
+      # PRE_UPDATE_CHECK_HOOK: ""          # around the steamcmd update check
+      # POST_UPDATE_CHECK_HOOK: ""
+      # PRE_START_HOOK: ""                 # around the FIRST server start
+      # POST_START_HOOK: ""
+      # PRE_RESTART_HOOK: ""               # around a scheduled restart — the
+      # POST_RESTART_HOOK: ""              #   natural place for a warning message
+      # PRE_SERVER_RUN_HOOK: ""            # around the server process itself
+      # POST_SERVER_RUN_HOOK: ""           #   (post- is capped at 29 s)
+      # PRE_SERVER_LISTENING_HOOK: ""      # running, not yet accepting players
+      # POST_SERVER_LISTENING_HOOK: ""     # ACCEPTING PLAYERS — "server is up!"
+      # PRE_SERVER_SHUTDOWN_HOOK: ""       # before shutdown (>90 s = hard kill)
+      # POST_SERVER_SHUTDOWN_HOOK: ""      # after the server has stopped
+      # PRE_BACKUP_HOOK: ""                # @BACKUP_FILE@ = the backup's full path
+      # POST_BACKUP_HOOK: ""               #   — with BACKUPS_ZIP=false that path
+      #                                    #   is a DIRECTORY, so copy with -r
+      # PRE_BEPINEX_CONFIG_HOOK: ""        # around writing BepInEx.cfg
+      # POST_BEPINEX_CONFIG_HOOK: ""       #   (only fires when a mod loader is on)
+      #
+      # Announce startup on Discord:
+      #     DISCORD_WEBHOOK: "https://discord.com/api/webhooks/..."
+      #     POST_SERVER_LISTENING_HOOK: 'curl -sfSL -X POST -H "Content-Type: application/json" -d "{\"username\":\"Valheim\",\"content\":\"$$SERVER_NAME is up\"}" "$$DISCORD_WEBHOOK"'
+      #
+      # Copy each backup offsite (mount a key at /root/.ssh/id_rsa first):
+      #     POST_BACKUP_HOOK: 'timeout 300 scp -r @BACKUP_FILE@ me@example.com:~/backups/'
+
+      # ═══ Modding ═════════════════════════════════════════════════════════════
+      # vh.py does not install, update, or remove plugins. This section documents
+      # the container's built-in support; the files are yours to manage.
+      #
+      # BEPINEX AND VALHEIM_PLUS ARE MUTUALLY EXCLUSIVE. Enabling both is a
+      # configuration error — pick one.
+      #
+      # BepInEx — the general-purpose loader most Thunderstore mods target.
+      #   Drop plugin .dll files in   data/__INSTANCE__/bepinex/plugins/
+      #   Config lives in            data/__INSTANCE__/bepinex/
+      # BEPINEX: "false"                   # default: false
+      #
+      # ValheimPlus — a single large all-in-one tweak mod. Its own plugins go in
+      #   data/__INSTANCE__/valheimplus/plugins/ ; config in valheimplus/
+      # VALHEIM_PLUS: "false"              # default: false
+      # VALHEIM_PLUS_REPO: "Grantapher/ValheimPlus"  # switch to a fork if needed
+      # VALHEIM_PLUS_RELEASE: "latest"     # or a tag, e.g. "tags/0.9.9.8"
+      #
+      # Every player must run the SAME mods as the server. A mod loader also
+      # means the game can no longer auto-update cleanly — the mod usually has to
+      # catch up first. Consider pinning the image tag while you run mods.
+      #
+      # ── Mod config from environment variables ──
+      # Instead of hand-editing .cfg files you can set them here, using
+      #     <PREFIX>_<Section>_<Key>: "<value>"
+      # which is merged into the real config file on start (the previous file is
+      # kept alongside as *.cfg.old):
+      #     VPCFG_       -> /config/valheimplus/valheim_plus.cfg
+      #     BEPINEXCFG_  -> BepInEx.cfg, in whichever of the two dirs is active
+      #
+      # Section names may contain characters an env var name cannot. Encode them:
+      #     _DOT_        .
+      #     _HYPHEN_     -
+      #     _UNDERSCORE_ _
+      #     _PLUS_       +
+      #     _SPACE_      (a space)
+      #
+      # So BEPINEXCFG_Logging_DOT_Console_Enabled: "true"  writes
+      #     [Logging.Console]
+      #     Enabled=true
+      #
+      #     VPCFG_Server_enabled: "true"
+      #     VPCFG_Server_enforceMod: "false"
+      #     BEPINEXCFG_Logging_DOT_Console_Enabled: "true"
+      #
+      # Mods using RPC need SERVER_PORT + 2 (2458/udp) opened as well — the same
+      # port crossplay uses. See the commented ports: line at the top.
+
+      # ═══ Permissions, time zone, secrets ═════════════════════════════════════
+      # The container runs as root by default and that is the recommended setting.
+      #
+      # ⚠ PUID/PGID ARE A TRAP ON OLD IMAGES. Running non-root on any image before
+      # 1.2.0 applies the FILE permission mode to the per-world DIRECTORIES that
+      # Valheim 1.0 creates, stripping their execute bit. The server then logs
+      # UnauthorizedAccessException, KEEPS RUNNING, and serves no world at all —
+      # the container stays "healthy", players just cannot join, and nothing says
+      # why. At PUID=0 this cannot happen. If you must run non-root, be on 1.2.0+.
+      # PUID: "0"                          # default: 0 (root)
+      # PGID: "0"                          # default: 0 (root)
+      #
+      # PERMISSIONS_UMASK: "022"           # default: 022 — umask for worlds,
+      #                                    #   backups and config it writes
+      # TZ: "Etc/UTC"                      # default: Etc/UTC. Set your own zone
+      #                                    #   (e.g. "America/Argentina/Buenos_Aires")
+      #                                    #   so the cron schedules above fire at
+      #                                    #   the local times you expect
+      #
+      # Keep the password out of this file — mount a secret and point at it.
+      # SERVER_PASS_FILE wins over SERVER_PASS when the file exists.
+      # SERVER_PASS_FILE: "/run/secrets/server_pass"
+
+      # ═══ SteamCMD ════════════════════════════════════════════════════════════
+      # STEAMCMD_ARGS: "validate"          # default: validate — verifies the
+      #                                    #   download every update. Dropping it
+      #                                    #   is faster and riskier
+      # PUBLIC_TEST: "false"               # default: false. true switches to the
+      #                                    #   public-test branch — a DIFFERENT
+      #                                    #   game build. Worlds it touches may
+      #                                    #   not open on the release version
+
+    volumes:
+      # Per-instance: worlds_local/, backups/, adminlist.txt, mod configs.
+      - ../../data/__INSTANCE__:/config
+      # SHARED between all instances: the ~1 GB Valheim dedicated server that
+      # SteamCMD downloads. Mounting it means the download happens once, not
+      # once per instance, and a fresh `up` does not re-fetch it.
+      # This is safe only because vh.py runs one server at a time.
+      - ../../server:/opt/valheim
