@@ -39,6 +39,28 @@ Tracking `latest` over pinning `1.2.0`: auto-updating is this image's core value
 
 **Alternatives considered:** pinning `1.2.0` in generated instances (reproducible, but silently freezes out the next save-format fix); using the Docker Hub mirror for familiarity (rejected — correctness).
 
+### Generated instances pin `platform: linux/amd64` on ARM hosts
+
+Found during implementation, not planning: the Valheim dedicated server is an
+x86_64 binary, so the image is published for `linux/amd64` only and Docker
+refuses to start it on an ARM host (`no matching manifest for linux/arm64/v8`).
+Pinning the platform gets the container to start under emulation, but that is
+not a working server: SteamCMD's core is a 32-bit x86 binary that segfaults while
+loading the Steam API under emulation. Verified on Apple Silicon under both of
+Docker Desktop's backends — Rosetta and its QEMU fallback — so the game download
+never completes and the container retries forever while looking healthy.
+
+The conclusion is that an x86_64 host is a hard requirement, and the honest thing
+is to say so loudly. `vh.py` still writes the platform line when scaffolding on
+an ARM host, so the attempt is at least coherent, and `up` prints a warning
+naming the failure mode and pointing at the README. Template and README both
+state the requirement rather than presenting emulation as a viable option.
+
+**Alternatives considered:** always emitting the line (harmless on x86_64, but it
+is noise in a file whose whole point is that it contains only what you chose);
+documenting it and letting the user add it (a first-run failure for every ARM
+user, which the goals explicitly reject).
+
 ### One template, not three
 
 Splitting by mod framework would produce three files differing by one boolean, since Valheim has a single server binary. Splitting by "simple vs full" would force a guess about which options a given user considers advanced, and the wizard already answers that question dynamically. A single annotated `valheim.yml` therefore serves as both the hand-edit starting point and the reference document.
