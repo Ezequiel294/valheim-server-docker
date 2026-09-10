@@ -27,6 +27,8 @@ copy and hand-edit. Either way your real config lives under `instances/`
 │   ├── valheim-on-arm.md        Raspberry Pi / ARM hosts, and what works there
 │   ├── world-modifiers.md       difficulty, resources, raids, portals
 │   └── valheim-1.0-worlds.md    the new save format, and upgrading an old world
+├── scripts/
+│   └── try-box64-binfmt.sh   ARM hosts: can this machine run the stock image?
 └── vh.py                     the manager
 ```
 

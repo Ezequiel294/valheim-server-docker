@@ -49,6 +49,16 @@ Cheapest experiment, and if it works there is nothing to maintain: you get the
 upstream image with its Valheim 1.0 chunked-save handling intact, and this repo
 works unchanged apart from the `platform:` line `vh.py` already writes.
 
+`scripts/try-box64-binfmt.sh` does the whole sequence for you, on the Pi:
+
+```bash
+sudo ./scripts/try-box64-binfmt.sh          # run it
+sudo ./scripts/try-box64-binfmt.sh --undo   # put everything back
+```
+
+It works in stages and stops at the first failure, so the output names the gate
+that broke. The manual steps are below if you would rather do it by hand.
+
 The idea is to register box64 as the kernel's handler for x86_64 executables, so
 an `amd64` container's binaries run under box64 instead of QEMU. The `F` flag
 matters: it pins the interpreter in memory so it still resolves inside a
@@ -69,10 +79,22 @@ sudo systemctl restart systemd-binfmt
 cat /proc/sys/fs/binfmt_misc/box64      # flags should include F
 ```
 
-box86 is itself a 32-bit ARM binary, so a 64-bit Pi OS needs armhf multiarch
-(`sudo dpkg --add-architecture armhf`) before it will run. Newer box64 builds
-have a `box32` mode that can cover the same ground — check box64's
-`docs/COMPILE.md` for which your build supports.
+You do not actually need box86. Building box64 with `-DBOX32=ON` lets it run
+32-bit x86 itself, which covers SteamCMD and avoids adding armhf multiarch to a
+64-bit Pi OS. Register box64 as the handler for *both* formats — that is what the
+i386 entry above does. For a Pi 5 the full configure line is:
+
+```
+cmake .. -DRPI5ARM64=1 -DBOX32=ON -DBOX32_BINFMT=ON -DSTATICBUILD=ON \
+         -DCMAKE_BUILD_TYPE=RelWithDebInfo
+```
+
+`STATICBUILD` is the part that matters most for containers, and it is the part
+box64 marks experimental. box64 is an arm64 binary; inside an amd64 container its
+arm64 shared libraries do not exist, so a dynamically-linked handler cannot load
+— the same failure that bites dynamically-linked qemu. The static build carries
+only minimal wrapped libs (libc, libm, libpthread) and takes everything else from
+the container's own x86_64 libraries, which for this image is exactly right.
 
 Then the smoke test that actually decides it. **SteamCMD is the gate**, not the
 server — the server binary does not exist until SteamCMD fetches it:
